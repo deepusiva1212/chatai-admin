@@ -73,10 +73,20 @@ app.get('/health', async () => ({
 }));
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-try {
-  await app.listen({ port: PORT, host: '0.0.0.0' });
-  app.log.info(`🚀 SaaS Platform ready — port ${PORT}`);
-} catch (err) {
-  app.log.error(err);
-  process.exit(1);
+
+// 1. Local Development
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    await app.listen({ port: PORT, host: '0.0.0.0' });
+    app.log.info(`🚀 SaaS Platform ready — port ${PORT}`);
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+}
+
+// 2. Vercel Serverless Function Handler
+export default async function handler(req, res) {
+  await app.ready();
+  app.server.emit('request', req, res);
 }
