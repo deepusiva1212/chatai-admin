@@ -16,7 +16,7 @@ export default async function chatRoutes(app) {
 
   // ── POST /api/chat ─────────────────────────────────────────────────────────
   app.post('/api/chat', {
-    preHandler: [apiKeyMiddleware],
+    // preHandler: [apiKeyMiddleware],
     schema: {
       body: {
         type: 'object',
