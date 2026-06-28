@@ -1,0 +1,274 @@
+// prisma/schema.prisma
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTI-TENANT DATA MODEL
+//
+// Isolation strategy: SHARED DATABASE, SHARED SCHEMA with organizationId
+// as a discriminator column on every tenant-owned table.
+//
+// Why this approach over separate schemas/databases?
+//   - Simpler ops: one connection pool, one migration run
+//   - Cost-efficient for early-stage SaaS (100s of tenants on one DB)
+//   - Row-level security (RLS) in Postgres can enforce isolation at DB level
+//     (see migrations/rls.sql for the RLS policy setup)
+//
+// Data flow:
+//   HTTP request → API key header → ApiKey row → organizationId
+//   → every subsequent query is scoped WHERE organizationId = :id
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORGANIZATION — the core tenant unit
+// One row per company that buys a white-label license from you.
+// Your own domains (mytripraja.com, deepusiva.com) are also tenants here
+// so all tenant-scoped logic applies uniformly to first-party usage.
+// ─────────────────────────────────────────────────────────────────────────────
+model Organization {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Identity
+  name      String              // "MyTripRaja", "Acme Corp"
+  slug      String   @unique    // url-safe identifier: "mytripraja"
+  plan      Plan     @default(STARTER)
+  status    OrgStatus @default(ACTIVE)
+
+  // Owner contact (used for webhook email reports, billing, etc.)
+  ownerEmail String
+  ownerName  String?
+
+  // White-label branding — these values are embedded in the widget config
+  // so the customer's chat window looks like their own product
+  brandName       String?        // "TripBot" (shown in widget header)
+  brandLogoUrl    String?        // CDN URL to their logo
+  brandPrimaryColor String?      // hex: "#1a73e8"
+  brandFontFamily   String?      // "Inter"
+
+  // Optional: restrict which domains may load widgets for this org.
+  // Null = allow all (for internal/dev use). In prod, always set this.
+  allowedOrigins  String[]       // ["https://mytripraja.com", "https://admin.mytripraja.com"]
+
+  // Vapi voice configuration
+  vapiPhoneNumberId String?      // Vapi phone number assigned to this org
+  vapiAssistantId   String?      // Vapi assistant config ID
+
+  // Relationships
+  apiKeys        ApiKey[]
+  knowledgeBases KnowledgeBase[]
+  callLogs       CallLog[]
+  chatSessions   ChatSession[]
+
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API KEY — white-label access credentials
+// Each org can have multiple keys (e.g. one per domain, one for dev).
+// The widget embeds the public key in its <script> tag; the server resolves
+// it to an organizationId on every request.
+//
+// Security model:
+//   - Keys are hashed (SHA-256) before storage. The raw key is shown ONCE
+//     at creation time and never stored in plaintext.
+//   - keyPrefix (first 8 chars) allows fast partial lookup without exposing
+//     the full key in logs.
+// ─────────────────────────────────────────────────────────────────────────────
+model ApiKey {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String          // Human label: "Production - mytripraja.com"
+  keyPrefix   String          // First 8 chars for log-safe identification: "sk_live_"
+  keyHash     String @unique  // SHA-256 hash of the full key
+  isActive    Boolean @default(true)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?       // Null = never expires
+
+  // Usage tracking
+  requestCount    Int @default(0)
+  rateLimit       Int @default(1000)  // requests per day, enforced in middleware
+
+  @@index([keyPrefix])          // fast prefix lookup before full hash compare
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWLEDGE BASE — RAG source configuration per tenant
+// Each entry references a collection of documents ingested into the
+// vector store (pgvector / Pinecone). One org can have multiple KBs
+// (e.g. "Products FAQ" and "Shipping Policy").
+// ─────────────────────────────────────────────────────────────────────────────
+model KnowledgeBase {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String          // "MyTripRaja Travel FAQ"
+  description String?
+
+  // Vector store reference
+  // For pgvector: this is the table name prefix used for this KB's embeddings.
+  // For Pinecone: this is the namespace within the shared index.
+  vectorNamespace String       // "org_<slug>_<kb_id>" — ensures strict isolation
+
+  // Ingestion metadata
+  status         KBStatus  @default(PENDING)
+  documentCount  Int       @default(0)
+  lastIngestedAt DateTime?
+
+  // LLM config override for this KB (inherits org default if null)
+  embeddingModel   String?   // "text-embedding-3-small"
+  retrievalTopK    Int       @default(5)
+  systemPromptOverride String? // Custom system prompt injected before RAG context
+
+  @@index([organizationId])
+  @@map("knowledge_bases")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALL LOG — Vapi voice call records per tenant
+// Populated by the POST /webhooks/vapi/:orgId endpoint when a call ends.
+// Stores the full transcript, summary, and metadata for reporting.
+// ─────────────────────────────────────────────────────────────────────────────
+model CallLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Vapi identifiers
+  vapiCallId      String  @unique  // Vapi's own call ID — used for idempotency
+  vapiAssistantId String?
+
+  // Call details
+  callerNumber    String?          // E.164: "+919876543210"
+  calledNumber    String?
+  direction       CallDirection @default(INBOUND)
+  durationSeconds Int?
+
+  // Call outcome
+  status          CallStatus @default(COMPLETED)
+  endedReason     String?          // Vapi end reason: "customer-ended-call"
+
+  // Content — stored as JSONB for flexibility
+  transcript      Json?            // [{ role: "user"|"assistant", content, timestamp }]
+  summary         String?          // AI-generated summary of the call
+  sentiment       String?          // "positive" | "neutral" | "negative"
+  actionItems     String[]         // extracted follow-ups
+
+  // Reporting
+  reportEmailedAt DateTime?        // set when the post-call email is sent
+
+  @@index([organizationId])
+  @@index([vapiCallId])
+  @@index([createdAt])
+  @@map("call_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT SESSION — groups messages from a single widget session
+// Isolated by organizationId. The sessionToken ties a browser tab to a session
+// without requiring the end-user to be authenticated.
+// ─────────────────────────────────────────────────────────────────────────────
+model ChatSession {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  sessionToken  String   @unique  // random token from the widget, not the API key
+  endUserRef    String?           // optional: their own user ID if they pass it
+  origin        String?           // window.location.origin from the widget
+
+  messages      ChatMessage[]
+
+  @@index([organizationId])
+  @@index([sessionToken])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  role      MessageRole              // "user" | "assistant"
+  content   String
+  agent     String?                  // which sub-agent handled: "support", "news", etc.
+  provider  String?                  // "claude" | "gemini" | "openai"
+  latencyMs Int?
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+enum Plan {
+  STARTER      // 1 KB, 1 API key, 500 calls/mo
+  GROWTH       // 5 KBs, 5 API keys, 5000 calls/mo
+  ENTERPRISE   // unlimited
+}
+
+enum OrgStatus {
+  ACTIVE
+  SUSPENDED    // billing lapsed
+  DELETED      // soft delete
+}
+
+enum KBStatus {
+  PENDING      // created, not yet ingested
+  INGESTING    // ingestion job running
+  READY        // available for RAG queries
+  ERROR        // ingestion failed
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  COMPLETED
+  FAILED
+  NO_ANSWER
+  VOICEMAIL
+}
+
+enum MessageRole {
+  user
+  assistant
+}
+
+model ChatRule {
+  id            String  @id @default(uuid())
+  organizationId String
+  keywords      String
+  replyText     String
+  exactMatch    Boolean @default(false)
+  priority      Int     @default(0)
+  isActive      Boolean @default(true)
+}
