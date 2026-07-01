@@ -9,9 +9,10 @@ import cors         from '@fastify/cors';
 import rateLimit    from '@fastify/rate-limit';
 import websocket    from '@fastify/websocket';
 import prismaPlugin from './plugins/prisma.js';
-import chatRoutes   from './routes/chat.js';
-import apiKeyRoutes from './routes/api-keys.js';
-import vapiWebhook  from './routes/webhooks/vapi.js';
+import chatRoutes      from './routes/chat.js';
+import apiKeyRoutes    from './routes/api-keys.js';
+import vapiWebhook     from './routes/webhooks/vapi.js';
+import chatRuleRoutes  from './routes/admin/chat-rules.js';
 
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 const ENV  = process.env.NODE_ENV ?? 'development';
@@ -63,6 +64,7 @@ await app.register(rateLimit, {
 // ── Routes ────────────────────────────────────────────────────────────────────
 await app.register(chatRoutes);
 await app.register(apiKeyRoutes);
+await app.register(chatRuleRoutes);   // ← admin CRUD for ChatRule model
 await app.register(vapiWebhook, { prefix: '/webhooks' });
 
 // ── Health ────────────────────────────────────────────────────────────────────
