@@ -40,15 +40,10 @@ await app.register(prismaPlugin);
 await app.register(websocket);
 
 await app.register(cors, {
-  origin: ENV === 'production'
-    ? (origin, cb) => {
-        // In production, CORS is enforced per-org in apiKeyMiddleware via
-        // allowedOrigins. Here we accept any origin at the transport layer;
-        // the middleware does the actual enforcement after DB lookup.
-        cb(null, true);
-      }
+origin: ENV === 'production' 
+    ? 'https://chatai-orpin-kappa.vercel.app' 
     : true,
-  methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
 });
 
