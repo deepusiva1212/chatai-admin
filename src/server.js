@@ -40,11 +40,9 @@ await app.register(prismaPlugin);
 await app.register(websocket);
 
 await app.register(cors, {
-origin: ENV === 'production' 
-    ? 'https://chatai-orpin-kappa.vercel.app' 
-    : true,
+  origin: 'https://chatai-orpin-kappa.vercel.app', // Explicitly allow your frontend domain
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  credentials: true,
+  credentials: true, // Required for authentication/session headers
 });
 
 await app.register(rateLimit, {
